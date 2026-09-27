@@ -3,7 +3,7 @@
  * Converts user proofreading messages into elegant note cards and applies highlights to original text
  */
 
-import { findAnchorPosition, applyHighlightToNode, removeHighlightFromNode } from './anchor.js';
+import { findAnchorPosition, applyHighlightToNode, removeHighlightFromNode, clearAllHighlights } from './anchor.js';
 
 /**
  * Escapes HTML characters safely
@@ -84,6 +84,7 @@ export function formatDiffHtml(diffHunk) {
  * @param {Array<object>} entries
  */
 export function syncHighlightsToTarget(targetMessageIndex, entries) {
+  if (typeof document === 'undefined') return;
   const targetMesEl = document.querySelector(`.mes[mesid="${targetMessageIndex}"]`);
   if (!targetMesEl) return;
 
@@ -111,6 +112,7 @@ export function syncHighlightsToTarget(targetMessageIndex, entries) {
  * @param {number} targetMessageIndex
  */
 export function highlightAndScrollToNote(targetMessageIndex) {
+  if (typeof document === 'undefined') return;
   const noteMesEl = document.querySelector(`.mes.tp-proofread-card-mes[data-target-index="${targetMessageIndex}"]`);
   if (noteMesEl) {
     noteMesEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -125,6 +127,7 @@ export function highlightAndScrollToNote(targetMessageIndex) {
  * @param {string} entryId
  */
 export function scrollToOriginalHighlight(targetMessageIndex, entryId) {
+  if (typeof document === 'undefined') return;
   const targetMesEl = document.querySelector(`.mes[mesid="${targetMessageIndex}"]`);
   if (!targetMesEl) return;
 
@@ -142,10 +145,13 @@ export function scrollToOriginalHighlight(targetMessageIndex, entryId) {
  * Renders the custom proofreader card into the DOM element of a note message
  * @param {HTMLElement} mesEl The message DOM element
  * @param {object} message The message data object
- * @param {object} callbacks { onRevokeEntry, onToggleCollapse }
+ * @param {object} callbacks { onRevokeEntry }
  */
 export function renderProofreadCard(mesEl, message, { onRevokeEntry }) {
+  if (!mesEl || typeof mesEl.querySelector !== 'function') return;
+
   const proofreader = message?.extra?.proofreader;
+  // Strict guard: only render if this message is explicitly a proofreader note!
   if (!proofreader || !proofreader.isProofreadNote) return;
 
   const targetIndex = proofreader.targetMessageIndex;
@@ -203,19 +209,21 @@ export function renderProofreadCard(mesEl, message, { onRevokeEntry }) {
   const cardBody = mesTextEl.querySelector('.tp-card-body');
   const container = mesTextEl.querySelector('.tp-card-container');
 
-  collapseBtn.onclick = (e) => {
-    e.stopPropagation();
-    proofreader.collapsed = !proofreader.collapsed;
-    if (proofreader.collapsed) {
-      cardBody.style.display = 'none';
-      collapseBtn.textContent = '展开 ▼';
-      container.classList.add('tp-collapsed');
-    } else {
-      cardBody.style.display = 'block';
-      collapseBtn.textContent = '折叠 ▲';
-      container.classList.remove('tp-collapsed');
-    }
-  };
+  if (collapseBtn && cardBody && container) {
+    collapseBtn.onclick = (e) => {
+      e.stopPropagation();
+      proofreader.collapsed = !proofreader.collapsed;
+      if (proofreader.collapsed) {
+        cardBody.style.display = 'none';
+        collapseBtn.textContent = '展开 ▼';
+        container.classList.add('tp-collapsed');
+      } else {
+        cardBody.style.display = 'block';
+        collapseBtn.textContent = '折叠 ▲';
+        container.classList.remove('tp-collapsed');
+      }
+    };
+  }
 
   // Bind Entry Actions
   mesTextEl.querySelectorAll('.tp-entry-item').forEach((itemEl) => {
@@ -241,3 +249,5 @@ export function renderProofreadCard(mesEl, message, { onRevokeEntry }) {
   // Sync highlights onto target message in DOM
   syncHighlightsToTarget(targetIndex, entries);
 }
+
+export { clearAllHighlights };

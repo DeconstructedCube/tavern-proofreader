@@ -6,7 +6,7 @@
 import { computeUnifiedDiff } from './src/diff-engine.js';
 import { proofreaderGenerateInterceptor, DEFAULT_SLIDING_WINDOW } from './src/interceptor.js';
 import { initSelectionHandler } from './src/selection.js';
-import { buildProofreadMessageText, renderProofreadCard, syncHighlightsToTarget } from './src/card-renderer.js';
+import { buildProofreadMessageText, renderProofreadCard, syncHighlightsToTarget, clearAllHighlights } from './src/card-renderer.js';
 import { removeHighlightFromNode } from './src/anchor.js';
 
 const MODULE_NAME = 'tavern_proofreader';
@@ -177,7 +177,7 @@ async function mountSettingsUI() {
 /**
  * Handles new proofread submission from the selection editor
  */
-export function handleSubmitProofread({ targetMessageIndex, exact, revisedText, instruction, anchor }) {
+export async function handleSubmitProofread({ targetMessageIndex, exact, revisedText, instruction, anchor }) {
   const context = SillyTavern.getContext();
   const chat = context.chat;
   if (!Array.isArray(chat) || targetMessageIndex >= chat.length) return;
@@ -195,7 +195,6 @@ export function handleSubmitProofread({ targetMessageIndex, exact, revisedText, 
     createdAt: Date.now(),
   };
 
-  // Check if an existing proofread note message directly follows the target message (Consolidation)
   const nextMsgIndex = targetMessageIndex + 1;
   const nextMsg = chat[nextMsgIndex];
 
@@ -204,14 +203,8 @@ export function handleSubmitProofread({ targetMessageIndex, exact, revisedText, 
     nextMsg.extra.proofreader.entries = nextMsg.extra.proofreader.entries || [];
     nextMsg.extra.proofreader.entries.push(entry);
     nextMsg.mes = buildProofreadMessageText(nextMsg.extra.proofreader.entries, targetMessageIndex + 1);
-
-    // Update DOM card
-    const noteMesEl = document.querySelector(`.mes[mesid="${nextMsgIndex}"]`);
-    if (noteMesEl) {
-      renderProofreadCard(noteMesEl, nextMsg, { onRevokeEntry: handleRevokeEntry });
-    }
   } else {
-    // Create a new note message
+    // Insert new note message
     const newNote = {
       name: context.name1 || 'User',
       is_user: true,
@@ -228,37 +221,38 @@ export function handleSubmitProofread({ targetMessageIndex, exact, revisedText, 
         },
       },
     };
-
-    // Splice into chat array directly beneath target message
     chat.splice(nextMsgIndex, 0, newNote);
-
-    if (typeof context.printMessages === 'function') {
-      context.printMessages();
-    } else {
-      setTimeout(() => scanAndRenderAllNotes(), 50);
-    }
   }
 
-  context.saveChatDebounced();
-  syncHighlightsToTarget(targetMessageIndex, [entry]);
+  // Save chat to server
+  if (typeof context.saveChatConditional === 'function') {
+    await context.saveChatConditional();
+  } else if (typeof context.saveChat === 'function') {
+    await context.saveChat();
+  } else if (typeof context.saveChatDebounced === 'function') {
+    context.saveChatDebounced();
+  }
+
+  // Reload chat smoothly to ensure DOM matches array indices without wiping regex formats
+  if (typeof context.reloadCurrentChat === 'function') {
+    await context.reloadCurrentChat();
+  } else if (typeof context.printMessages === 'function') {
+    await context.printMessages();
+  } else {
+    scanAndRenderAllNotes();
+  }
 }
 
 /**
  * Handles revoking a single critique entry
  */
-export function handleRevokeEntry({ targetMessageIndex, entryId, noteMessage }) {
+export async function handleRevokeEntry({ targetMessageIndex, entryId, noteMessage }) {
   const context = SillyTavern.getContext();
   const chat = context.chat;
   if (!Array.isArray(chat)) return;
 
   const proofreader = noteMessage?.extra?.proofreader;
   if (!proofreader || !Array.isArray(proofreader.entries)) return;
-
-  // Remove target highlight from DOM
-  const targetMesEl = document.querySelector(`.mes[mesid="${targetMessageIndex}"] .mes_text`);
-  if (targetMesEl) {
-    removeHighlightFromNode(targetMesEl, entryId);
-  }
 
   // Filter entry
   proofreader.entries = proofreader.entries.filter((e) => e.id !== entryId);
@@ -267,20 +261,26 @@ export function handleRevokeEntry({ targetMessageIndex, entryId, noteMessage }) 
   if (noteIndex === -1) return;
 
   if (proofreader.entries.length === 0) {
-    // Delete the entire note message if empty
     chat.splice(noteIndex, 1);
-    const noteMesEl = document.querySelector(`.mes[mesid="${noteIndex}"]`);
-    if (noteMesEl) noteMesEl.remove();
   } else {
-    // Update message text
     noteMessage.mes = buildProofreadMessageText(proofreader.entries, targetMessageIndex + 1);
-    const noteMesEl = document.querySelector(`.mes[mesid="${noteIndex}"]`);
-    if (noteMesEl) {
-      renderProofreadCard(noteMesEl, noteMessage, { onRevokeEntry: handleRevokeEntry });
-    }
   }
 
-  context.saveChatDebounced();
+  if (typeof context.saveChatConditional === 'function') {
+    await context.saveChatConditional();
+  } else if (typeof context.saveChat === 'function') {
+    await context.saveChat();
+  } else if (typeof context.saveChatDebounced === 'function') {
+    context.saveChatDebounced();
+  }
+
+  if (typeof context.reloadCurrentChat === 'function') {
+    await context.reloadCurrentChat();
+  } else if (typeof context.printMessages === 'function') {
+    await context.printMessages();
+  } else {
+    scanAndRenderAllNotes();
+  }
 }
 
 /**
@@ -292,10 +292,13 @@ export function scanAndRenderAllNotes() {
   const chat = context.chat;
   if (!Array.isArray(chat)) return;
 
+  // Clear orphaned highlights first
+  clearAllHighlights();
+
   chat.forEach((msg, idx) => {
     if (msg?.extra?.proofreader?.isProofreadNote) {
       const mesEl = document.querySelector(`.mes[mesid="${idx}"]`);
-      if (mesEl) {
+      if (mesEl && mesEl.getAttribute('is_user') === 'true') {
         renderProofreadCard(mesEl, msg, { onRevokeEntry: handleRevokeEntry });
       }
       // Sync highlights to target
@@ -338,12 +341,11 @@ function registerSlashCommands() {
  * Enables and starts all extension subsystems
  */
 export function enableExtension() {
-  if (teardownSelection) return; // already active
+  if (teardownSelection) return;
 
   ensureStylesheetLoaded();
   mountSettingsUI();
 
-  // Initialize selection handler
   teardownSelection = initSelectionHandler({
     chatRoot: (typeof document !== 'undefined' ? (document.getElementById('chat') || document.body) : null),
     onSubmit: handleSubmitProofread,
@@ -355,7 +357,7 @@ export function enableExtension() {
     const mesId = typeof data === 'number' ? data : data?.mesId;
     if (mesId !== undefined && context.chat?.[mesId]?.extra?.proofreader?.isProofreadNote) {
       const mesEl = document.querySelector(`.mes[mesid="${mesId}"]`);
-      if (mesEl) {
+      if (mesEl && mesEl.getAttribute('is_user') === 'true') {
         renderProofreadCard(mesEl, context.chat[mesId], { onRevokeEntry: handleRevokeEntry });
       }
     }
@@ -372,36 +374,11 @@ export function enableExtension() {
   };
 
   boundMessageEdited = (data) => {
-    const mesId = typeof data === 'number' ? data : data?.mesId;
-    if (mesId !== undefined) {
-      const nextMsg = context.chat?.[mesId + 1];
-      if (nextMsg?.extra?.proofreader?.isProofreadNote) {
-        syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
-      }
-    }
+    setTimeout(() => scanAndRenderAllNotes(), 50);
   };
 
   boundMessageSwiped = (data) => {
-    const mesId = typeof data === 'number' ? data : data?.mesId;
-    if (mesId !== undefined) {
-      const currentSwipe = context.chat?.[mesId]?.swipe_id ?? 0;
-      const nextMsg = context.chat?.[mesId + 1];
-      if (nextMsg?.extra?.proofreader?.isProofreadNote) {
-        const isCurrentSwipe = nextMsg.extra.proofreader.targetSwipeId === currentSwipe;
-        const noteMesEl = document.querySelector(`.mes[mesid="${mesId + 1}"]`);
-        if (noteMesEl) {
-          noteMesEl.style.display = isCurrentSwipe ? '' : 'none';
-        }
-        if (isCurrentSwipe) {
-          syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
-        } else {
-          const targetMesEl = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
-          nextMsg.extra.proofreader.entries?.forEach((entry) => {
-            removeHighlightFromNode(targetMesEl, entry.id);
-          });
-        }
-      }
-    }
+    setTimeout(() => scanAndRenderAllNotes(), 50);
   };
 
   boundMessageDeleted = (data) => {
@@ -409,7 +386,7 @@ export function enableExtension() {
   };
 
   boundChatChanged = () => {
-    setTimeout(() => scanAndRenderAllNotes(), 100);
+    setTimeout(() => scanAndRenderAllNotes(), 80);
   };
 
   context.eventSource.on(context.event_types.USER_MESSAGE_RENDERED, boundUserMessageRendered);
@@ -432,6 +409,8 @@ export function disableExtension() {
     teardownSelection();
     teardownSelection = null;
   }
+
+  clearAllHighlights();
 
   if (boundUserMessageRendered) {
     context.eventSource.removeListener(context.event_types.USER_MESSAGE_RENDERED, boundUserMessageRendered);

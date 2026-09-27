@@ -58,18 +58,31 @@ export function stringSimilarity(a, b) {
  * @returns {{ exact: string, prefix: string, suffix: string }}
  */
 export function createAnchorFromRange(range, rootContainer, contextLength = 25) {
-  const exact = range.toString().trim();
-  const fullText = rootContainer.textContent || '';
+  const exact = range ? range.toString().trim() : '';
+  const fullText = rootContainer ? (rootContainer.textContent || '') : '';
 
-  // Get start and end character offsets relative to rootContainer's textContent
-  const preRange = document.createRange();
-  preRange.selectNodeContents(rootContainer);
-  preRange.setEnd(range.startContainer, range.startOffset);
-  const startOffset = preRange.toString().length;
-  const endOffset = startOffset + exact.length;
+  let prefix = '';
+  let suffix = '';
 
-  const prefix = fullText.slice(Math.max(0, startOffset - contextLength), startOffset);
-  const suffix = fullText.slice(endOffset, Math.min(fullText.length, endOffset + contextLength));
+  if (fullText && exact) {
+    try {
+      const preRange = document.createRange();
+      preRange.selectNodeContents(rootContainer);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      const startOffset = preRange.toString().length;
+      const endOffset = startOffset + exact.length;
+
+      prefix = fullText.slice(Math.max(0, startOffset - contextLength), startOffset);
+      suffix = fullText.slice(endOffset, Math.min(fullText.length, endOffset + contextLength));
+    } catch {
+      // Fallback if range endpoints cross shadow boundaries or complex nodes
+      const idx = fullText.indexOf(exact);
+      if (idx !== -1) {
+        prefix = fullText.slice(Math.max(0, idx - contextLength), idx);
+        suffix = fullText.slice(idx + exact.length, Math.min(fullText.length, idx + exact.length + contextLength));
+      }
+    }
+  }
 
   return { exact, prefix, suffix };
 }
@@ -133,10 +146,10 @@ export function findAnchorPosition(text, anchor, threshold = 0.8) {
  * @returns {Text[]}
  */
 export function getTextNodes(root) {
+  if (!root) return [];
   const textNodes = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
-      // Don't descend into existing proofreader highlights
       if (node.parentElement && node.parentElement.classList.contains('tp-highlight')) {
         return NodeFilter.FILTER_SKIP;
       }
@@ -199,12 +212,11 @@ export function applyHighlightToNode(container, entryId, startOffset, endOffset)
     const mark = document.createElement('mark');
     mark.className = 'tp-highlight';
     mark.setAttribute('data-entry-id', entryId);
-    mark.title = '点击查看编审批改';
+    mark.title = '点击查看批改便签';
 
     range.surroundContents(mark);
     return mark;
   } catch (err) {
-    // If range crosses complex node boundaries, fallback safely without throwing
     console.warn('[TavernProofreader] Could not surround range cleanly:', err);
     return null;
   }
@@ -221,9 +233,27 @@ export function removeHighlightFromNode(container, entryId) {
   if (!mark) return;
 
   const parent = mark.parentNode;
+  if (!parent) return;
+
   while (mark.firstChild) {
     parent.insertBefore(mark.firstChild, mark);
   }
   parent.removeChild(mark);
   parent.normalize();
+}
+
+/**
+ * Clears all proofreader highlight marks in the entire document
+ */
+export function clearAllHighlights() {
+  if (typeof document === 'undefined') return;
+  document.querySelectorAll('mark.tp-highlight').forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+    parent.normalize();
+  });
 }
