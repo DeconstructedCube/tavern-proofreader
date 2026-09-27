@@ -1,0 +1,30 @@
+<div id="tavern_proofreader_settings" class="tavern_proofreader-settings-drawer">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+      <b><i class="fa-solid fa-pen-nib"></i> <span data-i18n="Tavern Proofreader Settings">写作批注与批改设置</span></b>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content tavern_proofreader-drawer-content">
+      <div class="tavern_proofreader-row">
+        <label for="tavern_proofreader_enable_checkbox">
+          <span data-i18n="Enable Proofreader">启用划词批注与批改功能</span>
+        </label>
+        <input id="tavern_proofreader_enable_checkbox" type="checkbox" {{#if enabled}}checked{{/if}} />
+      </div>
+
+      <div class="tavern_proofreader-row">
+        <label for="tavern_proofreader_window_input">
+          <span data-i18n="Sliding Window Size">UserInput 坐标滑动窗口轮数</span>
+          <small class="opacity50p">(最近 N 轮有批改记录时在用户输入末尾附带轻量坐标)</small>
+        </label>
+        <input id="tavern_proofreader_window_input" class="text_pole tavern_proofreader-input" type="number" min="1" max="20" step="1" value="{{slidingWindowSize}}" />
+      </div>
+
+      <div class="tavern_proofreader-desc">
+        <small class="opacity70p">
+          选中文本后点击“批改”，即可修改字句或填写指导意见。修改内容会作为一条消息保存在对应楼层下方，并在后续发送时自动附带最近的修改记录索引。
+        </small>
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,24 @@
+{
+  "display_name": "文本批注与写作批改",
+  "loading_order": 15,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Community",
+  "version": "1.0.0",
+  "homePage": "https://github.com/example/tavern-proofreader",
+  "auto_update": false,
+  "minimum_client_version": "1.12.0",
+  "dependencies": [],
+  "generate_interceptor": "proofreaderGenerateInterceptor",
+  "i18n": {
+    "zh-cn": "i18n/zh-cn.json",
+    "en-us": "i18n/en-us.json"
+  },
+  "hooks": {
+    "activate": "onActivate",
+    "install": "onInstall",
+    "enable": "onEnable",
+    "disable": "onDisable",
+    "clean": "onClean"
+  }
+}
