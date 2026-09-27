@@ -39,8 +39,8 @@ mark.tp-highlight:hover {
 /* ========================================================================= */
 
 .tp-selection-toolbar {
-  position: absolute;
-  z-index: 9999;
+  position: fixed !important;
+  z-index: 99999 !important;
   display: flex;
   align-items: center;
   box-shadow: 0 4px 16px var(--SmartThemeShadowColor, rgba(var(--black-rgb, 0, 0, 0), 0.4));

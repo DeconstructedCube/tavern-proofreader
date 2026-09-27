@@ -17,7 +17,7 @@ let activeModalEl = null;
  * @returns {Function} Teardown function to unbind all listeners
  */
 export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
-  const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouchDevice = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
   function dismissTrigger() {
     if (activeTriggerEl) {
@@ -69,17 +69,18 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
       return;
     }
 
-    // Verify it's an AI message (not user)
+    // Verify it's an AI message (not user, not system)
     const isUserAttr = mesEl.getAttribute('is_user');
     const isUserClass = mesEl.classList.contains('is_user');
-    if (isUserAttr === 'true' || isUserClass) {
+    const isSystemAttr = mesEl.getAttribute('is_system');
+    if (isUserAttr === 'true' || isUserClass || isSystemAttr === 'true') {
       dismissTrigger();
       return;
     }
 
     // Determine message index
     const mesIdAttr = mesEl.getAttribute('mesid');
-    const targetMessageIndex = mesIdAttr ? parseInt(mesIdAttr, 10) : null;
+    const targetMessageIndex = mesIdAttr !== null ? parseInt(mesIdAttr, 10) : null;
     if (targetMessageIndex === null || isNaN(targetMessageIndex)) {
       dismissTrigger();
       return;
@@ -108,6 +109,15 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
     trigger.className = 'tp-selection-toolbar' + (isTouch ? ' tp-mobile' : ' tp-desktop');
     trigger.setAttribute('data-tt-mobile-surface', 'free-window');
 
+    // Prevent mousedown from collapsing selection prematurely
+    trigger.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    trigger.addEventListener('touchstart', (e) => {
+      e.stopPropagation();
+    }, { passive: true });
+
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'tp-trigger-btn';
@@ -124,13 +134,13 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
     document.body.appendChild(trigger);
     activeTriggerEl = trigger;
 
-    // Positioning
+    // Viewport-based positioning (fixed avoids chat overflow scroll displacement)
+    trigger.style.position = 'fixed';
+    trigger.style.zIndex = '99999';
+
     if (!isTouch && state.rect) {
-      // Position above selection on desktop
-      const scrollY = window.scrollY || window.pageYOffset;
-      const scrollX = window.scrollX || window.pageXOffset;
-      const top = Math.max(10, state.rect.top + scrollY - 42);
-      const left = Math.max(10, state.rect.left + scrollX + state.rect.width / 2 - 70);
+      const top = state.rect.top > 52 ? state.rect.top - 46 : state.rect.bottom + 8;
+      const left = Math.max(10, Math.min(window.innerWidth - 180, state.rect.left + state.rect.width / 2 - 80));
       trigger.style.top = `${top}px`;
       trigger.style.left = `${left}px`;
     } else {
@@ -142,8 +152,15 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
   }
 
   // Event listeners
-  const onMouseUp = () => setTimeout(handleSelection, 50);
-  const onTouchEnd = () => setTimeout(handleSelection, 100);
+  let selectionTimeout = null;
+  const onMouseUp = () => {
+    clearTimeout(selectionTimeout);
+    selectionTimeout = setTimeout(handleSelection, 40);
+  };
+  const onTouchEnd = () => {
+    clearTimeout(selectionTimeout);
+    selectionTimeout = setTimeout(handleSelection, 80);
+  };
   const onSelectionChange = () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) {
@@ -156,6 +173,7 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
   document.addEventListener('selectionchange', onSelectionChange);
 
   return function cleanup() {
+    clearTimeout(selectionTimeout);
     dismissTrigger();
     dismissModal();
     document.removeEventListener('mouseup', onMouseUp);

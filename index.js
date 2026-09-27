@@ -22,6 +22,27 @@ const defaultSettings = Object.freeze({
 });
 
 /**
+ * Dynamically resolves current extension folder name from import.meta.url
+ * @returns {string}
+ */
+export function getExtensionFolderName() {
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.url) {
+      const url = new URL(import.meta.url);
+      const parts = url.pathname.split('/').filter(Boolean);
+      const thirdPartyIdx = parts.indexOf('third-party');
+      if (thirdPartyIdx !== -1 && parts[thirdPartyIdx + 1]) {
+        return parts[thirdPartyIdx + 1];
+      }
+      if (parts.length >= 2) {
+        return parts[parts.length - 2];
+      }
+    }
+  } catch {}
+  return 'tavern-proofreader';
+}
+
+/**
  * Gets or initializes namespaced extension settings
  */
 export function getSettings() {
@@ -47,6 +68,23 @@ export function updateSetting(key, value) {
   context.saveSettingsDebounced();
 }
 
+/**
+ * Injects stylesheet if not already mounted by host
+ */
+export function ensureStylesheetLoaded() {
+  if (typeof document === 'undefined') return;
+  if (document.querySelector('link[href*="tavern-proofreader"], style#tavern-proofreader-style')) {
+    return;
+  }
+  try {
+    const link = document.createElement('link');
+    link.id = 'tavern-proofreader-style';
+    link.rel = 'stylesheet';
+    link.href = new URL('style.css', import.meta.url).href;
+    document.head.appendChild(link);
+  } catch {}
+}
+
 // Active listener references for paired teardown
 let teardownSelection = null;
 let boundUserMessageRendered = null;
@@ -57,30 +95,75 @@ let boundMessageDeleted = null;
 let boundChatChanged = null;
 
 /**
- * Mounts settings UI
+ * Mounts settings UI into extension panel
  */
 async function mountSettingsUI() {
+  if (typeof document === 'undefined') return;
   const context = SillyTavern.getContext();
+
   try {
     const settings = getSettings();
-    const html = await context.renderExtensionTemplateAsync(
-      `third-party/${MODULE_NAME}`,
-      'settings',
-      {
-        title: 'Tavern Proofreader 设置',
-        enabled: settings.enabled,
-        slidingWindowSize: settings.slidingWindowSize,
-      }
-    );
+    const folderName = getExtensionFolderName();
+    let html = '';
+
+    // Candidate folders for template resolution
+    const candidateFolders = [
+      `third-party/${folderName}`,
+      'third-party/tavern-proofreader',
+      'third-party/tavern_proofreader',
+    ];
+
+    for (const folder of candidateFolders) {
+      try {
+        html = await context.renderExtensionTemplateAsync(
+          folder,
+          'settings',
+          {
+            title: '写作批注与批改设置',
+            enabled: settings.enabled,
+            slidingWindowSize: settings.slidingWindowSize,
+          }
+        );
+        if (html && html.trim()) break;
+      } catch {}
+    }
+
+    // Fallback: direct relative fetch of settings.html
+    if (!html || !html.trim()) {
+      try {
+        const res = await fetch(new URL('settings.html', import.meta.url));
+        if (res.ok) {
+          html = await res.text();
+          html = html.replace(/\{\{title\}\}/g, '写作批注与批改设置')
+                     .replace(/\{\{#if enabled\}\}checked\{\{\/if\}\}/g, settings.enabled ? 'checked' : '')
+                     .replace(/\{\{slidingWindowSize\}\}/g, String(settings.slidingWindowSize));
+        }
+      } catch {}
+    }
+
+    if (!html || !html.trim()) return;
 
     $(`#${MODULE_NAME}_settings`).remove();
-    $('#extensions_settings2').append(html);
+    const targetContainer = $('#extensions_settings2').length ? $('#extensions_settings2') : $('#extensions_settings');
+    targetContainer.append(html);
 
-    $(`#${MODULE_NAME}_enable_checkbox`).on('change', function () {
-      updateSetting('enabled', $(this).prop('checked'));
+    // Bind drawer toggle directly
+    $(`#${MODULE_NAME}_settings .inline-drawer-toggle`).off('click').on('click', function () {
+      $(this).closest('.inline-drawer').find('.inline-drawer-content').stop().slideToggle(200);
+      $(this).find('.inline-drawer-icon').toggleClass('down up');
     });
 
-    $(`#${MODULE_NAME}_window_input`).on('change', function () {
+    $(`#${MODULE_NAME}_enable_checkbox`).off('change').on('change', function () {
+      const isChecked = $(this).prop('checked');
+      updateSetting('enabled', isChecked);
+      if (isChecked) {
+        enableExtension();
+      } else {
+        disableExtension();
+      }
+    });
+
+    $(`#${MODULE_NAME}_window_input`).off('change').on('change', function () {
       const val = parseInt($(this).val(), 10);
       if (!isNaN(val) && val >= 1) {
         updateSetting('slidingWindowSize', val);
@@ -149,11 +232,9 @@ export function handleSubmitProofread({ targetMessageIndex, exact, revisedText, 
     // Splice into chat array directly beneath target message
     chat.splice(nextMsgIndex, 0, newNote);
 
-    // If host has native printMessages or reload
     if (typeof context.printMessages === 'function') {
       context.printMessages();
     } else {
-      // Re-scan and render
       setTimeout(() => scanAndRenderAllNotes(), 50);
     }
   }
@@ -206,6 +287,7 @@ export function handleRevokeEntry({ targetMessageIndex, entryId, noteMessage }) 
  * Full scan and render for all proofread cards and original highlights in DOM
  */
 export function scanAndRenderAllNotes() {
+  if (typeof document === 'undefined') return;
   const context = SillyTavern.getContext();
   const chat = context.chat;
   if (!Array.isArray(chat)) return;
@@ -252,32 +334,23 @@ function registerSlashCommands() {
   );
 }
 
-/* ========================================================================= */
-/* 生命周期钩子实现                                                          */
-/* ========================================================================= */
+/**
+ * Enables and starts all extension subsystems
+ */
+export function enableExtension() {
+  if (teardownSelection) return; // already active
 
-export async function onActivate() {
-  console.log(`[${MODULE_NAME}] Extension activated`);
-  registerSlashCommands();
-}
-
-export async function onInstall() {
-  console.log(`[${MODULE_NAME}] Extension installed`);
-}
-
-export function onEnable() {
-  console.log(`[${MODULE_NAME}] Extension enabled`);
-  const context = SillyTavern.getContext();
-
+  ensureStylesheetLoaded();
   mountSettingsUI();
 
   // Initialize selection handler
   teardownSelection = initSelectionHandler({
-    chatRoot: document.getElementById('chat') || document.body,
+    chatRoot: (typeof document !== 'undefined' ? (document.getElementById('chat') || document.body) : null),
     onSubmit: handleSubmitProofread,
   });
 
-  // Paired event listeners
+  const context = SillyTavern.getContext();
+
   boundUserMessageRendered = (data) => {
     const mesId = typeof data === 'number' ? data : data?.mesId;
     if (mesId !== undefined && context.chat?.[mesId]?.extra?.proofreader?.isProofreadNote) {
@@ -291,7 +364,6 @@ export function onEnable() {
   boundCharMessageRendered = (data) => {
     const mesId = typeof data === 'number' ? data : data?.mesId;
     if (mesId !== undefined) {
-      // Look for note referencing this message
       const nextMsg = context.chat?.[mesId + 1];
       if (nextMsg?.extra?.proofreader?.isProofreadNote) {
         syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
@@ -323,7 +395,6 @@ export function onEnable() {
         if (isCurrentSwipe) {
           syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
         } else {
-          // Remove highlights for inactive swipe
           const targetMesEl = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
           nextMsg.extra.proofreader.entries?.forEach((entry) => {
             removeHighlightFromNode(targetMesEl, entry.id);
@@ -334,8 +405,6 @@ export function onEnable() {
   };
 
   boundMessageDeleted = (data) => {
-    const mesId = typeof data === 'number' ? data : data?.mesId;
-    // Handled natively by index shift or re-render
     setTimeout(() => scanAndRenderAllNotes(), 50);
   };
 
@@ -350,12 +419,13 @@ export function onEnable() {
   context.eventSource.on(context.event_types.MESSAGE_DELETED, boundMessageDeleted);
   context.eventSource.on(context.event_types.CHAT_CHANGED, boundChatChanged);
 
-  // Initial scan
   scanAndRenderAllNotes();
 }
 
-export function onDisable() {
-  console.log(`[${MODULE_NAME}] Extension disabled`);
+/**
+ * Disables and tears down all extension subsystems
+ */
+export function disableExtension() {
   const context = SillyTavern.getContext();
 
   if (teardownSelection) {
@@ -363,7 +433,6 @@ export function onDisable() {
     teardownSelection = null;
   }
 
-  // Remove all event listeners cleanly
   if (boundUserMessageRendered) {
     context.eventSource.removeListener(context.event_types.USER_MESSAGE_RENDERED, boundUserMessageRendered);
     boundUserMessageRendered = null;
@@ -389,10 +458,41 @@ export function onDisable() {
     boundChatChanged = null;
   }
 
-  // Remove UI elements
-  $(`#${MODULE_NAME}_settings`).remove();
-  $('.tp-selection-toolbar').remove();
-  $('.tp-modal-overlay').remove();
+  if (typeof $ !== 'undefined') {
+    $(`#${MODULE_NAME}_settings`).remove();
+    $('.tp-selection-toolbar').remove();
+    $('.tp-modal-overlay').remove();
+  }
+}
+
+/* ========================================================================= */
+/* 生命周期钩子实现                                                          */
+/* ========================================================================= */
+
+export async function onActivate() {
+  console.log(`[${MODULE_NAME}] Extension activated`);
+  registerSlashCommands();
+
+  const settings = getSettings();
+  if (settings.enabled !== false) {
+    enableExtension();
+  }
+}
+
+export async function onInstall() {
+  console.log(`[${MODULE_NAME}] Extension installed`);
+}
+
+export function onEnable() {
+  console.log(`[${MODULE_NAME}] Extension enabled`);
+  updateSetting('enabled', true);
+  enableExtension();
+}
+
+export function onDisable() {
+  console.log(`[${MODULE_NAME}] Extension disabled`);
+  updateSetting('enabled', false);
+  disableExtension();
 }
 
 export async function onClean() {
@@ -400,4 +500,18 @@ export async function onClean() {
   const context = SillyTavern.getContext();
   delete context.extensionSettings[MODULE_NAME];
   context.saveSettingsDebounced();
+}
+
+// Auto-run on DOM ready for seamless instant start upon import or reload
+if (typeof jQuery !== 'undefined') {
+  jQuery(async () => {
+    try {
+      const settings = getSettings();
+      if (settings.enabled !== false) {
+        enableExtension();
+      }
+    } catch (err) {
+      console.warn(`[${MODULE_NAME}] Auto-start deferred to host lifecycle`);
+    }
+  });
 }
