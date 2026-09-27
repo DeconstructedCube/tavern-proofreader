@@ -175,7 +175,29 @@ async function mountSettingsUI() {
 }
 
 /**
- * Handles new proofread submission from the selection editor
+ * Creates a standalone DOM message element for a proofreader note
+ * @param {object} noteMessage
+ * @param {number} mesId
+ * @returns {HTMLElement}
+ */
+function createProofreadMessageElement(noteMessage, mesId) {
+  const mesEl = document.createElement('div');
+  mesEl.className = 'mes is_user tp-proofread-card-mes';
+  mesEl.setAttribute('mesid', String(mesId));
+  mesEl.setAttribute('is_user', 'true');
+  mesEl.setAttribute('is_system', 'false');
+  mesEl.setAttribute('data-target-index', String(noteMessage.extra?.proofreader?.targetMessageIndex ?? (mesId - 1)));
+
+  const mesTextEl = document.createElement('div');
+  mesTextEl.className = 'mes_text';
+  mesEl.appendChild(mesTextEl);
+
+  renderProofreadCard(mesEl, noteMessage, { onRevokeEntry: handleRevokeEntry });
+  return mesEl;
+}
+
+/**
+ * Non-destructive insertion of a note directly beneath target message without wiping chat DOM
  */
 export async function handleSubmitProofread({ targetMessageIndex, exact, revisedText, instruction, anchor }) {
   const context = SillyTavern.getContext();
@@ -203,6 +225,12 @@ export async function handleSubmitProofread({ targetMessageIndex, exact, revised
     nextMsg.extra.proofreader.entries = nextMsg.extra.proofreader.entries || [];
     nextMsg.extra.proofreader.entries.push(entry);
     nextMsg.mes = buildProofreadMessageText(nextMsg.extra.proofreader.entries, targetMessageIndex + 1);
+
+    const noteMesEl = document.querySelector(`.mes[mesid="${nextMsgIndex}"]`) ||
+                      document.querySelector(`.mes.tp-proofread-card-mes[data-target-index="${targetMessageIndex}"]`);
+    if (noteMesEl) {
+      renderProofreadCard(noteMesEl, nextMsg, { onRevokeEntry: handleRevokeEntry });
+    }
   } else {
     // Insert new note message
     const newNote = {
@@ -221,10 +249,32 @@ export async function handleSubmitProofread({ targetMessageIndex, exact, revised
         },
       },
     };
+
+    // Splicing into chat array
     chat.splice(nextMsgIndex, 0, newNote);
+
+    // Non-destructively insert into DOM without destroying sibling iframes or regex frontends
+    const targetMesEl = document.querySelector(`.mes[mesid="${targetMessageIndex}"]`);
+    if (targetMesEl && targetMesEl.parentNode) {
+      // Shift mesid on following sibling DOM elements
+      let sibling = targetMesEl.nextElementSibling;
+      while (sibling) {
+        if (sibling.classList.contains('mes') && sibling.hasAttribute('mesid')) {
+          const oldId = parseInt(sibling.getAttribute('mesid'), 10);
+          if (!isNaN(oldId)) {
+            sibling.setAttribute('mesid', String(oldId + 1));
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+
+      // Insert new note element directly after target
+      const noteEl = createProofreadMessageElement(newNote, nextMsgIndex);
+      targetMesEl.after(noteEl);
+    }
   }
 
-  // Save chat to server
+  // Save chat to server safely
   if (typeof context.saveChatConditional === 'function') {
     await context.saveChatConditional();
   } else if (typeof context.saveChat === 'function') {
@@ -233,14 +283,8 @@ export async function handleSubmitProofread({ targetMessageIndex, exact, revised
     context.saveChatDebounced();
   }
 
-  // Reload chat smoothly to ensure DOM matches array indices without wiping regex formats
-  if (typeof context.reloadCurrentChat === 'function') {
-    await context.reloadCurrentChat();
-  } else if (typeof context.printMessages === 'function') {
-    await context.printMessages();
-  } else {
-    scanAndRenderAllNotes();
-  }
+  // Sync highlight on target text
+  syncHighlightsToTarget(targetMessageIndex, [entry]);
 }
 
 /**
@@ -254,6 +298,12 @@ export async function handleRevokeEntry({ targetMessageIndex, entryId, noteMessa
   const proofreader = noteMessage?.extra?.proofreader;
   if (!proofreader || !Array.isArray(proofreader.entries)) return;
 
+  // Remove target highlight from DOM
+  const targetMesEl = document.querySelector(`.mes[mesid="${targetMessageIndex}"] .mes_text`);
+  if (targetMesEl) {
+    removeHighlightFromNode(targetMesEl, entryId);
+  }
+
   // Filter entry
   proofreader.entries = proofreader.entries.filter((e) => e.id !== entryId);
 
@@ -262,8 +312,28 @@ export async function handleRevokeEntry({ targetMessageIndex, entryId, noteMessa
 
   if (proofreader.entries.length === 0) {
     chat.splice(noteIndex, 1);
+    const noteMesEl = document.querySelector(`.mes[mesid="${noteIndex}"]`) ||
+                      document.querySelector(`.mes.tp-proofread-card-mes[data-target-index="${targetMessageIndex}"]`);
+    if (noteMesEl) {
+      let sibling = noteMesEl.nextElementSibling;
+      while (sibling) {
+        if (sibling.classList.contains('mes') && sibling.hasAttribute('mesid')) {
+          const oldId = parseInt(sibling.getAttribute('mesid'), 10);
+          if (!isNaN(oldId)) {
+            sibling.setAttribute('mesid', String(oldId - 1));
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+      noteMesEl.remove();
+    }
   } else {
     noteMessage.mes = buildProofreadMessageText(proofreader.entries, targetMessageIndex + 1);
+    const noteMesEl = document.querySelector(`.mes[mesid="${noteIndex}"]`) ||
+                      document.querySelector(`.mes.tp-proofread-card-mes[data-target-index="${targetMessageIndex}"]`);
+    if (noteMesEl) {
+      renderProofreadCard(noteMesEl, noteMessage, { onRevokeEntry: handleRevokeEntry });
+    }
   }
 
   if (typeof context.saveChatConditional === 'function') {
@@ -273,18 +343,10 @@ export async function handleRevokeEntry({ targetMessageIndex, entryId, noteMessa
   } else if (typeof context.saveChatDebounced === 'function') {
     context.saveChatDebounced();
   }
-
-  if (typeof context.reloadCurrentChat === 'function') {
-    await context.reloadCurrentChat();
-  } else if (typeof context.printMessages === 'function') {
-    await context.printMessages();
-  } else {
-    scanAndRenderAllNotes();
-  }
 }
 
 /**
- * Full scan and render for all proofread cards and original highlights in DOM
+ * Scan and apply highlights/cards for existing notes safely
  */
 export function scanAndRenderAllNotes() {
   if (typeof document === 'undefined') return;
@@ -292,16 +354,12 @@ export function scanAndRenderAllNotes() {
   const chat = context.chat;
   if (!Array.isArray(chat)) return;
 
-  // Clear orphaned highlights first
-  clearAllHighlights();
-
   chat.forEach((msg, idx) => {
     if (msg?.extra?.proofreader?.isProofreadNote) {
       const mesEl = document.querySelector(`.mes[mesid="${idx}"]`);
       if (mesEl && mesEl.getAttribute('is_user') === 'true') {
         renderProofreadCard(mesEl, msg, { onRevokeEntry: handleRevokeEntry });
       }
-      // Sync highlights to target
       const targetIdx = msg.extra.proofreader.targetMessageIndex;
       if (typeof targetIdx === 'number' && msg.extra.proofreader.entries) {
         syncHighlightsToTarget(targetIdx, msg.extra.proofreader.entries);
@@ -374,19 +432,46 @@ export function enableExtension() {
   };
 
   boundMessageEdited = (data) => {
-    setTimeout(() => scanAndRenderAllNotes(), 50);
+    const mesId = typeof data === 'number' ? data : data?.mesId;
+    if (mesId !== undefined) {
+      const nextMsg = context.chat?.[mesId + 1];
+      if (nextMsg?.extra?.proofreader?.isProofreadNote) {
+        syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
+      }
+    }
   };
 
   boundMessageSwiped = (data) => {
-    setTimeout(() => scanAndRenderAllNotes(), 50);
+    const mesId = typeof data === 'number' ? data : data?.mesId;
+    if (mesId !== undefined) {
+      const currentSwipe = context.chat?.[mesId]?.swipe_id ?? 0;
+      const nextMsg = context.chat?.[mesId + 1];
+      if (nextMsg?.extra?.proofreader?.isProofreadNote) {
+        const isCurrentSwipe = nextMsg.extra.proofreader.targetSwipeId === currentSwipe;
+        const noteMesEl = document.querySelector(`.mes[mesid="${mesId + 1}"]`);
+        if (noteMesEl) {
+          noteMesEl.style.display = isCurrentSwipe ? '' : 'none';
+        }
+        if (isCurrentSwipe) {
+          syncHighlightsToTarget(mesId, nextMsg.extra.proofreader.entries || []);
+        } else {
+          const targetMesEl = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
+          nextMsg.extra.proofreader.entries?.forEach((entry) => {
+            removeHighlightFromNode(targetMesEl, entry.id);
+          });
+        }
+      }
+    }
   };
 
-  boundMessageDeleted = (data) => {
-    setTimeout(() => scanAndRenderAllNotes(), 50);
+  boundMessageDeleted = () => {
+    clearAllHighlights();
+    scanAndRenderAllNotes();
   };
 
   boundChatChanged = () => {
-    setTimeout(() => scanAndRenderAllNotes(), 80);
+    clearAllHighlights();
+    setTimeout(() => scanAndRenderAllNotes(), 60);
   };
 
   context.eventSource.on(context.event_types.USER_MESSAGE_RENDERED, boundUserMessageRendered);

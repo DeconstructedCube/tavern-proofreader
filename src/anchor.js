@@ -1,6 +1,6 @@
 /**
  * Tavern Proofreader - W3C TextQuoteSelector & Fuzzy Re-anchoring Engine
- * Provides resilient text highlighting across Markdown re-renders and edits
+ * Safe text node splitting without breaking custom HTML, regex frontends or iframes
  */
 
 /**
@@ -141,7 +141,7 @@ export function findAnchorPosition(text, anchor, threshold = 0.8) {
 }
 
 /**
- * Collects all pure text nodes under an element
+ * Collects all pure text nodes under an element (skips iframes, scripts, and existing highlights)
  * @param {Node} root
  * @returns {Text[]}
  */
@@ -150,7 +150,14 @@ export function getTextNodes(root) {
   const textNodes = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
-      if (node.parentElement && node.parentElement.classList.contains('tp-highlight')) {
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_SKIP;
+
+      const tag = parent.tagName.toUpperCase();
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'IFRAME' || tag === 'NOSCRIPT') {
+        return NodeFilter.FILTER_REJECT;
+      }
+      if (parent.classList.contains('tp-highlight') || parent.closest('.tp-highlight')) {
         return NodeFilter.FILTER_SKIP;
       }
       return NodeFilter.FILTER_ACCEPT;
@@ -165,7 +172,8 @@ export function getTextNodes(root) {
 }
 
 /**
- * Highlights a text range in an HTML container element by wrapping it in <mark>
+ * Safely highlights text in an HTML container element using node splitting
+ * Does NOT destroy sibling elements, iframes, or custom regex frontend markup
  * @param {HTMLElement} container
  * @param {string} entryId
  * @param {number} startOffset
@@ -181,49 +189,49 @@ export function applyHighlightToNode(container, entryId, startOffset, endOffset)
 
   const textNodes = getTextNodes(container);
   let currentOffset = 0;
-  let startNode = null;
-  let startNodeOffset = 0;
-  let endNode = null;
-  let endNodeOffset = 0;
 
-  for (const node of textNodes) {
-    const nodeLen = node.textContent?.length || 0;
-    const nodeEnd = currentOffset + nodeLen;
-
-    if (!startNode && startOffset >= currentOffset && startOffset <= nodeEnd) {
-      startNode = node;
-      startNodeOffset = startOffset - currentOffset;
-    }
-    if (!endNode && endOffset >= currentOffset && endOffset <= nodeEnd) {
-      endNode = node;
-      endNodeOffset = endOffset - currentOffset;
-      break;
-    }
+  for (const textNode of textNodes) {
+    const textLen = textNode.textContent?.length || 0;
+    const nodeStart = currentOffset;
+    const nodeEnd = currentOffset + textLen;
     currentOffset = nodeEnd;
+
+    // Check if this text node intersects with the target range
+    if (endOffset > nodeStart && startOffset < nodeEnd) {
+      const localStart = Math.max(0, startOffset - nodeStart);
+      const localEnd = Math.min(textLen, endOffset - nodeStart);
+
+      if (localStart >= localEnd) continue;
+
+      try {
+        // Safe splitting: split target portion into its own standalone text node
+        let middleNode = textNode;
+        if (localStart > 0) {
+          middleNode = textNode.splitText(localStart);
+        }
+        if (localEnd - localStart < middleNode.textContent.length) {
+          middleNode.splitText(localEnd - localStart);
+        }
+
+        const mark = document.createElement('mark');
+        mark.className = 'tp-highlight';
+        mark.setAttribute('data-entry-id', entryId);
+        mark.title = '点击查看批改便签';
+
+        middleNode.parentNode.replaceChild(mark, middleNode);
+        mark.appendChild(middleNode);
+        return mark;
+      } catch (err) {
+        console.warn('[TavernProofreader] Safe highlight split failed:', err);
+      }
+    }
   }
 
-  if (!startNode || !endNode) return null;
-
-  try {
-    const range = document.createRange();
-    range.setStart(startNode, startNodeOffset);
-    range.setEnd(endNode, endNodeOffset);
-
-    const mark = document.createElement('mark');
-    mark.className = 'tp-highlight';
-    mark.setAttribute('data-entry-id', entryId);
-    mark.title = '点击查看批改便签';
-
-    range.surroundContents(mark);
-    return mark;
-  } catch (err) {
-    console.warn('[TavernProofreader] Could not surround range cleanly:', err);
-    return null;
-  }
+  return null;
 }
 
 /**
- * Removes a highlight mark from a container and merges text nodes
+ * Removes a highlight mark and un-wraps its text content without calling normalize on container
  * @param {HTMLElement} container
  * @param {string} entryId
  */
@@ -239,11 +247,10 @@ export function removeHighlightFromNode(container, entryId) {
     parent.insertBefore(mark.firstChild, mark);
   }
   parent.removeChild(mark);
-  parent.normalize();
 }
 
 /**
- * Clears all proofreader highlight marks in the entire document
+ * Clears all proofreader highlight marks in the entire document safely
  */
 export function clearAllHighlights() {
   if (typeof document === 'undefined') return;
@@ -254,6 +261,5 @@ export function clearAllHighlights() {
       parent.insertBefore(mark.firstChild, mark);
     }
     parent.removeChild(mark);
-    parent.normalize();
   });
 }
