@@ -10,6 +10,63 @@ let activeTriggerEl = null;
 let activeModalEl = null;
 
 /**
+ * Extracts the current selection state from window.getSelection()
+ * @returns {object|null}
+ */
+export function getLiveSelectionState() {
+  if (typeof window === 'undefined') return null;
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const selectedText = range.toString().trim();
+  if (selectedText.length === 0) {
+    return null;
+  }
+
+  // Locate the containing message element
+  const container = range.commonAncestorContainer;
+  const mesTextEl = container.nodeType === Node.ELEMENT_NODE
+    ? container.closest('.mes_text')
+    : container.parentElement?.closest('.mes_text');
+
+  if (!mesTextEl) return null;
+
+  // Locate outer message card
+  const mesEl = mesTextEl.closest('.mes, div[mesid]');
+  if (!mesEl) return null;
+
+  // Verify it's an AI message (not user, not system)
+  const isUserAttr = mesEl.getAttribute('is_user');
+  const isUserClass = mesEl.classList.contains('is_user');
+  const isSystemAttr = mesEl.getAttribute('is_system');
+  if (isUserAttr === 'true' || isUserClass || isSystemAttr === 'true') {
+    return null;
+  }
+
+  // Determine message index
+  const mesIdAttr = mesEl.getAttribute('mesid');
+  const targetMessageIndex = mesIdAttr !== null ? parseInt(mesIdAttr, 10) : null;
+  if (targetMessageIndex === null || isNaN(targetMessageIndex)) {
+    return null;
+  }
+
+  // Capture anchor data safely
+  const anchor = createAnchorFromRange(range, mesTextEl);
+
+  return {
+    targetMessageIndex,
+    mesTextEl,
+    exact: selectedText,
+    anchor,
+    rect: range.getBoundingClientRect(),
+  };
+}
+
+/**
  * Initializes selection and touch listeners on the chat container
  * @param {object} options
  * @param {HTMLElement} [options.chatRoot]
@@ -38,78 +95,36 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
     // If modal is currently open, don't show floating trigger
     if (activeModalEl) return;
 
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    const liveState = getLiveSelectionState();
+    if (!liveState) {
       dismissTrigger();
       return;
     }
 
-    const range = selection.getRangeAt(0);
-    const selectedText = range.toString().trim();
-    if (selectedText.length === 0) {
-      dismissTrigger();
-      return;
-    }
-
-    // Locate the containing message element
-    const container = range.commonAncestorContainer;
-    const mesTextEl = container.nodeType === Node.ELEMENT_NODE
-      ? container.closest('.mes_text')
-      : container.parentElement?.closest('.mes_text');
-
-    if (!mesTextEl) {
-      dismissTrigger();
-      return;
-    }
-
-    // Locate outer message card
-    const mesEl = mesTextEl.closest('.mes, div[mesid]');
-    if (!mesEl) {
-      dismissTrigger();
-      return;
-    }
-
-    // Verify it's an AI message (not user, not system)
-    const isUserAttr = mesEl.getAttribute('is_user');
-    const isUserClass = mesEl.classList.contains('is_user');
-    const isSystemAttr = mesEl.getAttribute('is_system');
-    if (isUserAttr === 'true' || isUserClass || isSystemAttr === 'true') {
-      dismissTrigger();
-      return;
-    }
-
-    // Determine message index
-    const mesIdAttr = mesEl.getAttribute('mesid');
-    const targetMessageIndex = mesIdAttr !== null ? parseInt(mesIdAttr, 10) : null;
-    if (targetMessageIndex === null || isNaN(targetMessageIndex)) {
-      dismissTrigger();
-      return;
-    }
-
-    // Capture anchor data
-    const anchor = createAnchorFromRange(range, mesTextEl);
-
-    currentSelectionState = {
-      targetMessageIndex,
-      mesTextEl,
-      exact: selectedText,
-      anchor,
-      rect: range.getBoundingClientRect(),
-    };
+    currentSelectionState = liveState;
 
     renderTriggerToolbar(currentSelectionState, isTouchDevice, () => {
-      openInPlaceEditor(currentSelectionState, onSubmit, dismissModal);
+      // Re-read live selection at moment of opening to guarantee latest dragged range
+      const freshState = getLiveSelectionState() || currentSelectionState;
+      openInPlaceEditor(freshState, onSubmit, dismissModal);
     });
   }
 
   function renderTriggerToolbar(state, isTouch, onOpenEditor) {
-    dismissTrigger();
+    if (activeTriggerEl) {
+      // Update existing button text and count without recreating DOM
+      const btn = activeTriggerEl.querySelector('.tp-trigger-btn');
+      if (btn) {
+        btn.innerHTML = `<span class="tp-icon">✍</span> 批改选中文本 <small>(${state.exact.length}字)</small>`;
+      }
+      return;
+    }
 
     const trigger = document.createElement('div');
     trigger.className = 'tp-selection-toolbar' + (isTouch ? ' tp-mobile' : ' tp-desktop');
     trigger.setAttribute('data-tt-mobile-surface', 'free-window');
 
-    // Prevent mousedown from collapsing selection prematurely
+    // Prevent mousedown/touchstart from collapsing selection prematurely
     trigger.addEventListener('mousedown', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -134,7 +149,7 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
     document.body.appendChild(trigger);
     activeTriggerEl = trigger;
 
-    // Viewport-based positioning (fixed avoids chat overflow scroll displacement)
+    // Viewport-based positioning
     trigger.style.position = 'fixed';
     trigger.style.zIndex = '99999';
 
@@ -151,20 +166,22 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
     }
   }
 
-  // Event listeners
+  // Event listeners: debounce handleSelection for smooth dragging handle tracking
   let selectionTimeout = null;
-  const onMouseUp = () => {
+  const debouncedHandleSelection = (delay = 40) => {
     clearTimeout(selectionTimeout);
-    selectionTimeout = setTimeout(handleSelection, 40);
+    selectionTimeout = setTimeout(handleSelection, delay);
   };
-  const onTouchEnd = () => {
-    clearTimeout(selectionTimeout);
-    selectionTimeout = setTimeout(handleSelection, 80);
-  };
+
+  const onMouseUp = () => debouncedHandleSelection(30);
+  const onTouchEnd = () => debouncedHandleSelection(50);
   const onSelectionChange = () => {
+    // Dynamically track selection expansions/collapses
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) {
       dismissTrigger();
+    } else {
+      debouncedHandleSelection(60);
     }
   };
 
@@ -189,6 +206,8 @@ export function initSelectionHandler({ chatRoot = document.body, onSubmit }) {
  * @param {Function} onDismiss
  */
 function openInPlaceEditor(state, onSubmit, onDismiss) {
+  if (!state || !state.exact) return;
+
   const modalOverlay = document.createElement('div');
   modalOverlay.className = 'tp-modal-overlay';
   modalOverlay.setAttribute('data-tt-mobile-surface', 'backdrop');
@@ -230,6 +249,7 @@ function openInPlaceEditor(state, onSubmit, onDismiss) {
 
   modalOverlay.appendChild(card);
   document.body.appendChild(modalOverlay);
+  activeModalEl = modalOverlay;
 
   const revisedInput = card.querySelector('.tp-revised-input');
   const instructionInput = card.querySelector('.tp-instruction-input');
@@ -265,6 +285,7 @@ function openInPlaceEditor(state, onSubmit, onDismiss) {
 
   const close = () => {
     modalOverlay.remove();
+    activeModalEl = null;
     onDismiss();
   };
 
