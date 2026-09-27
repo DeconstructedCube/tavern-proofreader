@@ -30,14 +30,20 @@
 
 ## 安装方法
 
-将本目录放置在第三方扩展文件夹中：
-
-```bash
-# SillyTavern 全局扩展目录
-public/scripts/extensions/third-party/tavern-proofreader/
-
-# 或 TauriTavern 用户目录
-data/default-user/extensions/tavern-proofreader/
+### 方式 1：从酒馆面板在线安装（推荐）
+在 SillyTavern 扩展管理页面中，选择 **从 URL 安装扩展**，输入仓库地址：
+```text
+https://github.com/DeconstructedCube/tavern-proofreader
 ```
+点击安装后启用即可。
 
-在酒馆扩展管理面板中启用即可。
+### 方式 2：手动克隆安装
+```bash
+# SillyTavern
+cd public/scripts/extensions/third-party/
+git clone https://github.com/DeconstructedCube/tavern-proofreader.git
+
+# TauriTavern 用户目录
+cd data/default-user/extensions/
+git clone https://github.com/DeconstructedCube/tavern-proofreader.git
+```
